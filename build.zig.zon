@@ -1,7 +1,7 @@
 .{
     .name = .varint,
 
-    .version = "0.1.0",
+    .version = "0.1.1",
 
     .fingerprint = 0xe2cd7a3616af76d5,
 

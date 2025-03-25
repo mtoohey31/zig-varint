@@ -1,5 +1,6 @@
 const std = @import("std");
 const debug = std.debug;
+const io = std.io;
 const math = std.math;
 const mem = std.mem;
 const testing = std.testing;
@@ -54,7 +55,7 @@ pub fn decodeUnchecked(comptime T: type, buf: *[]const u8) T {
     }
 }
 
-test "decodeUnchecked" {
+test decodeUnchecked {
     {
         var buf: []const u8 = &[_]u8{ 204, 49 };
         try testing.expectEqual(3174, decodeUnchecked(i16, &buf));
@@ -73,32 +74,33 @@ test "decodeUnchecked" {
 
 pub const DecodeError = error{ Overflow, UnexpectedEnd };
 
-/// Decode the varint within buf. buf will be reassigned to the subset of its
-/// original value following the bytes that contained the varint.
-pub fn decode(comptime T: type, buf: *[]const u8) DecodeError!T {
+pub fn read(
+    comptime T: type,
+    reader: anytype,
+) (@TypeOf(reader).Error || DecodeError)!T {
     const signedness = switch (@typeInfo(T)) {
         .int => |int| int.signedness,
         else => @compileError("expected T to have integer type"),
     };
 
     var acc: Unsigned(T) = 0;
-    var shift_amt: math.Log2Int(Unsigned(T)) = 0;
-    var curr_buf = buf.*;
-    while (curr_buf.len > 0) {
-        const x = curr_buf[0];
-        acc |= try math.shlExact(Unsigned(T), x & 0x7F, shift_amt);
-        curr_buf = curr_buf[1..];
+    var shift_amt: ?math.Log2Int(Unsigned(T)) = 0;
+    while (true) {
+        const x = reader.readByte() catch return error.UnexpectedEnd;
+        if (shift_amt) |s| {
+            acc |= try math.shlExact(Unsigned(T), x & 0x7F, s);
+        } else if (x & 0x7F != 0) {
+            return error.Overflow;
+        }
 
         if (x < 0x80) {
             break;
         }
 
-        // TODO: Does this have to be more permissive?
-        shift_amt = try math.add(math.Log2Int(Unsigned(T)), shift_amt, 7);
-    } else {
-        return error.UnexpectedEnd;
+        if (shift_amt) |s| {
+            shift_amt = math.add(math.Log2Int(Unsigned(T)), s, 7) catch null;
+        }
     }
-    buf.* = curr_buf;
 
     switch (signedness) {
         .signed => {
@@ -112,7 +114,33 @@ pub fn decode(comptime T: type, buf: *[]const u8) DecodeError!T {
     }
 }
 
-test "decode" {
+test read {
+    {
+        var stream = io.fixedBufferStream(&[_]u8{ 204, 49 });
+        try testing.expectEqual(3174, try read(i16, stream.reader()));
+    }
+
+    {
+        var stream = io.fixedBufferStream(&[_]u8{ 203, 49 });
+        try testing.expectEqual(-3174, try read(i16, stream.reader()));
+    }
+
+    {
+        var stream = io.fixedBufferStream(&[_]u8{ 215, 26 });
+        try testing.expectEqual(3415, try read(u32, stream.reader()));
+    }
+}
+
+/// Decode the varint within buf. buf will be reassigned to the subset of its
+/// original value following the bytes that contained the varint.
+pub fn decode(comptime T: type, buf: *[]const u8) DecodeError!T {
+    var stream = io.fixedBufferStream(buf.*);
+    const res = try read(T, stream.reader());
+    buf.* = buf.*[try stream.getPos()..];
+    return res;
+}
+
+test decode {
     {
         var buf: []const u8 = &[_]u8{ 204, 49 };
         try testing.expectEqual(3174, try decode(i16, &buf));
@@ -144,7 +172,7 @@ pub fn encodedLen(comptime T: type, x: T) usize {
     };
 }
 
-test "encodedLen" {
+test encodedLen {
     try testing.expectEqual(2, encodedLen(u32, 256));
     try testing.expectEqual(2, encodedLen(u32, 153));
     try testing.expectEqual(1, encodedLen(u32, 128));
@@ -206,7 +234,7 @@ pub fn allocEncode(comptime T: type, alloc: mem.Allocator, x: T) mem.Allocator.E
     return buf;
 }
 
-test "allocEncode" {
+test allocEncode {
     {
         var buf: []const u8 = try allocEncode(u32, testing.allocator, 153);
         const original_buf = buf;
@@ -288,4 +316,55 @@ pub fn allocEncodeZ(comptime T: type, alloc: mem.Allocator, x: T) mem.Allocator.
     const buf = try alloc.allocSentinel(u8, encodedLen(T, x), 0);
     _ = encodeUnchecked(T, x, buf);
     return buf;
+}
+
+/// Write x to writer.
+pub fn write(comptime T: type, x: T, writer: anytype) @TypeOf(writer).Error!void {
+    const signedness = switch (@typeInfo(T)) {
+        .int => |int| int.signedness,
+        else => @compileError("expected T to have integer type"),
+    };
+
+    var y: Unsigned(T) = blk: {
+        switch (signedness) {
+            .signed => {
+                var y = @as(Unsigned(T), @bitCast(x)) << 1;
+                if (x < 0) {
+                    y = ~y;
+                }
+                break :blk y;
+            },
+            .unsigned => break :blk x,
+        }
+    };
+    while (y >= 0x80) {
+        try writer.writeByte(@as(u8, @truncate(y & 0b111_1111)) | 0b1000_0000);
+        y >>= 7;
+    }
+    try writer.writeByte(@truncate(y));
+}
+
+test write {
+    var array_list = std.ArrayList(u8).init(testing.allocator);
+    defer array_list.deinit();
+
+    {
+        try write(u32, 153, array_list.writer());
+        var buf: []const u8 = array_list.items;
+        try testing.expectEqualDeep(153, try decode(u32, &buf));
+        try testing.expectEqual(array_list.items[2..], buf);
+        array_list.clearAndFree();
+    }
+
+    {
+        try write(u32, 3415, array_list.writer());
+        try testing.expectEqualDeep(&[_]u8{ 215, 26 }, array_list.items);
+        array_list.clearAndFree();
+    }
+
+    {
+        try write(i16, -3415, array_list.writer());
+        try testing.expectEqualDeep(&[_]u8{ 173, 53 }, array_list.items);
+        array_list.clearAndFree();
+    }
 }
