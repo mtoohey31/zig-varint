@@ -166,6 +166,7 @@ pub fn encodedLen(comptime T: type, x: T) usize {
         },
         else => @compileError("expected T to have integer type"),
     };
+    if (x == 0) return 1;
     const bits = sign_bits + math.log2_int_ceil(Unsigned(T), @abs(x));
     return math.divCeil(usize, bits, 7) catch {
         unreachable;
@@ -173,6 +174,7 @@ pub fn encodedLen(comptime T: type, x: T) usize {
 }
 
 test encodedLen {
+    try testing.expectEqual(1, encodedLen(u32, 0));
     try testing.expectEqual(2, encodedLen(u32, 256));
     try testing.expectEqual(2, encodedLen(u32, 153));
     try testing.expectEqual(1, encodedLen(u32, 128));
