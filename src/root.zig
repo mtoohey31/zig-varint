@@ -221,7 +221,7 @@ pub const BufEncodeError = error{NoSpaceLeft};
 /// Encode x into buf, throwing error.NoSpaceLeft if it won't fit. Returns the
 /// subset of buf following the bytes written for x.
 pub fn bufEncode(comptime T: type, x: T, buf: []u8) BufEncodeError![]u8 {
-    if (encodedLen(T, x) < buf.len) {
+    if (encodedLen(T, x) > buf.len) {
         return error.NoSpaceLeft;
     }
 
