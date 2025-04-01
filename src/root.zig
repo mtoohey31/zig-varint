@@ -72,12 +72,12 @@ test decodeUnchecked {
     }
 }
 
-pub const DecodeError = error{ Overflow, UnexpectedEnd };
+pub const DecodeError = error{ EndOfStream, Overflow };
 
 pub fn read(
     comptime T: type,
     reader: anytype,
-) (@TypeOf(reader).Error || DecodeError)!T {
+) (@TypeOf(reader).NoEofError || DecodeError)!T {
     const signedness = switch (@typeInfo(T)) {
         .int => |int| int.signedness,
         else => @compileError("expected T to have integer type"),
@@ -86,7 +86,7 @@ pub fn read(
     var acc: Unsigned(T) = 0;
     var shift_amt: ?math.Log2Int(Unsigned(T)) = 0;
     while (true) {
-        const x = reader.readByte() catch return error.UnexpectedEnd;
+        const x = try reader.readByte();
         if (shift_amt) |s| {
             acc |= try math.shlExact(Unsigned(T), x & 0x7F, s);
         } else if (x & 0x7F != 0) {
