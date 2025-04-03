@@ -19,7 +19,7 @@ fn Unsigned(comptime T: type) type {
 /// Decode the varint within buf, without checking for overflow and assuming
 /// the varint in buf is properly terminated. buf will be reassigned to the
 /// subset of its original value following the bytes that contained the varint.
-pub fn decodeUnchecked(comptime T: type, buf: *[]const u8) T {
+pub fn decodeUnchecked(comptime T: type, buf: []const u8) struct { T, []const u8 } {
     const signedness = switch (@typeInfo(T)) {
         .int => |int| int.signedness,
         else => @compileError("expected T to have integer type"),
@@ -27,7 +27,7 @@ pub fn decodeUnchecked(comptime T: type, buf: *[]const u8) T {
 
     var acc: Unsigned(T) = 0;
     var shift_amt: math.Log2Int(Unsigned(T)) = 0;
-    var curr_buf = buf.*;
+    var curr_buf = buf;
     while (true) {
         debug.assert(curr_buf.len > 0);
         const x = curr_buf[0];
@@ -41,7 +41,6 @@ pub fn decodeUnchecked(comptime T: type, buf: *[]const u8) T {
 
         shift_amt += 7;
     }
-    buf.* = curr_buf;
 
     switch (signedness) {
         .signed => {
@@ -49,26 +48,26 @@ pub fn decodeUnchecked(comptime T: type, buf: *[]const u8) T {
             if ((acc & 1) != 0) {
                 signed = ~signed;
             }
-            return signed;
+            return .{ signed, curr_buf };
         },
-        .unsigned => return acc,
+        .unsigned => return .{ acc, curr_buf },
     }
 }
 
 test decodeUnchecked {
     {
-        var buf: []const u8 = &[_]u8{ 204, 49 };
-        try testing.expectEqual(3174, decodeUnchecked(i16, &buf));
+        const buf: []const u8 = &[_]u8{ 204, 49 };
+        try testing.expectEqual(3174, decodeUnchecked(i16, buf).@"0");
     }
 
     {
-        var buf: []const u8 = &[_]u8{ 203, 49 };
-        try testing.expectEqual(-3174, decodeUnchecked(i16, &buf));
+        const buf: []const u8 = &[_]u8{ 203, 49 };
+        try testing.expectEqual(-3174, decodeUnchecked(i16, buf).@"0");
     }
 
     {
-        var buf: []const u8 = &[_]u8{ 215, 26 };
-        try testing.expectEqual(3415, decodeUnchecked(u32, &buf));
+        const buf: []const u8 = &[_]u8{ 215, 26 };
+        try testing.expectEqual(3415, decodeUnchecked(u32, buf).@"0");
     }
 }
 
@@ -133,27 +132,61 @@ test read {
 
 /// Decode the varint within buf. buf will be reassigned to the subset of its
 /// original value following the bytes that contained the varint.
-pub fn decode(comptime T: type, buf: *[]const u8) DecodeError!T {
-    var stream = io.fixedBufferStream(buf.*);
-    const res = try read(T, stream.reader());
-    buf.* = buf.*[try stream.getPos()..];
-    return res;
+pub fn decode(comptime T: type, buf: []const u8) DecodeError!struct { T, []const u8 } {
+    const signedness = switch (@typeInfo(T)) {
+        .int => |int| int.signedness,
+        else => @compileError("expected T to have integer type"),
+    };
+
+    var acc: Unsigned(T) = 0;
+    var shift_amt: ?math.Log2Int(Unsigned(T)) = 0;
+    var curr_buf = buf;
+    while (curr_buf.len > 0) {
+        debug.assert(curr_buf.len > 0);
+        const x = curr_buf[0];
+        if (shift_amt) |s| {
+            acc |= try math.shlExact(Unsigned(T), x & 0x7F, s);
+        } else if (x & 0x7F != 0) {
+            return error.Overflow;
+        }
+
+        curr_buf = curr_buf[1..];
+
+        if (x < 0x80) {
+            break;
+        }
+
+        if (shift_amt) |s| {
+            shift_amt = math.add(math.Log2Int(Unsigned(T)), s, 7) catch null;
+        }
+    } else return error.EndOfStream;
+
+    switch (signedness) {
+        .signed => {
+            var signed: T = @intCast(acc >> 1);
+            if ((acc & 1) != 0) {
+                signed = ~signed;
+            }
+            return .{ signed, curr_buf };
+        },
+        .unsigned => return .{ acc, curr_buf },
+    }
 }
 
 test decode {
     {
-        var buf: []const u8 = &[_]u8{ 204, 49 };
-        try testing.expectEqual(3174, try decode(i16, &buf));
+        const buf: []const u8 = &[_]u8{ 204, 49 };
+        try testing.expectEqual(3174, (try decode(i16, buf)).@"0");
     }
 
     {
-        var buf: []const u8 = &[_]u8{ 203, 49 };
-        try testing.expectEqual(-3174, try decode(i16, &buf));
+        const buf: []const u8 = &[_]u8{ 203, 49 };
+        try testing.expectEqual(-3174, (try decode(i16, buf)).@"0");
     }
 
     {
-        var buf: []const u8 = &[_]u8{ 215, 26 };
-        try testing.expectEqual(3415, try decode(u32, &buf));
+        const buf: []const u8 = &[_]u8{ 215, 26 };
+        try testing.expectEqual(3415, (try decode(u32, buf)).@"0");
     }
 }
 
@@ -238,11 +271,11 @@ pub fn allocEncode(comptime T: type, alloc: mem.Allocator, x: T) mem.Allocator.E
 
 test allocEncode {
     {
-        var buf: []const u8 = try allocEncode(u32, testing.allocator, 153);
-        const original_buf = buf;
-        defer testing.allocator.free(original_buf);
-        try testing.expectEqualDeep(153, try decode(u32, &buf));
-        try testing.expectEqual(original_buf[2..], buf);
+        const buf: []const u8 = try allocEncode(u32, testing.allocator, 153);
+        defer testing.allocator.free(buf);
+        const actual, const actual_buf = try decode(u32, buf);
+        try testing.expectEqualDeep(153, actual);
+        try testing.expectEqual(buf[2..], actual_buf);
     }
 
     {
@@ -261,12 +294,10 @@ test allocEncode {
 test "fuzz decodeUnchecked if decode u32" {
     try std.testing.fuzz(@as(u1, 0), struct {
         fn f(_: u1, input: []const u8) anyerror!void {
-            var buf = input;
-            const expected = decode(u32, &buf) catch {
+            const expected, _ = decode(u32, input) catch {
                 return;
             };
-            buf = input;
-            try testing.expectEqual(expected, decodeUnchecked(u32, &buf));
+            try testing.expectEqual(expected, decodeUnchecked(u32, input).@"0");
         }
     }.f, .{});
 }
@@ -274,12 +305,10 @@ test "fuzz decodeUnchecked if decode u32" {
 test "fuzz decodeUnchecked if decode i64" {
     try std.testing.fuzz(@as(u1, 0), struct {
         fn f(_: u1, input: []const u8) anyerror!void {
-            var buf = input;
-            const expected = decode(i64, &buf) catch {
+            const expected, _ = decode(i64, input) catch {
                 return;
             };
-            buf = input;
-            try testing.expectEqual(expected, decodeUnchecked(i64, &buf));
+            try testing.expectEqual(expected, decodeUnchecked(i64, input).@"0");
         }
     }.f, .{});
 }
@@ -288,12 +317,11 @@ test "fuzz decode inverse encode u64" {
     try std.testing.fuzz(@as(u1, 0), struct {
         fn f(_: u1, input: []const u8) anyerror!void {
             const expected = std.hash.Murmur2_64.hash(input);
-            var buf: []const u8 = allocEncode(u64, testing.allocator, expected) catch {
+            const buf: []const u8 = allocEncode(u64, testing.allocator, expected) catch {
                 return;
             };
-            const original_buf = buf;
-            defer testing.allocator.free(original_buf);
-            try testing.expectEqual(expected, decodeUnchecked(u64, &buf));
+            defer testing.allocator.free(buf);
+            try testing.expectEqual(expected, decodeUnchecked(u64, buf).@"0");
         }
     }.f, .{});
 }
@@ -302,12 +330,11 @@ test "fuzz decode inverse encode i32" {
     try std.testing.fuzz(@as(u1, 0), struct {
         fn f(_: u1, input: []const u8) anyerror!void {
             const expected: i32 = @bitCast(std.hash.Murmur2_32.hash(input));
-            var buf: []const u8 = allocEncode(i32, testing.allocator, expected) catch {
+            const buf: []const u8 = allocEncode(i32, testing.allocator, expected) catch {
                 return;
             };
-            const original_buf = buf;
-            defer testing.allocator.free(original_buf);
-            try testing.expectEqual(expected, decodeUnchecked(i32, &buf));
+            defer testing.allocator.free(buf);
+            try testing.expectEqual(expected, decodeUnchecked(i32, buf).@"0");
         }
     }.f, .{});
 }
@@ -352,9 +379,10 @@ test write {
 
     {
         try write(u32, 153, array_list.writer());
-        var buf: []const u8 = array_list.items;
-        try testing.expectEqualDeep(153, try decode(u32, &buf));
-        try testing.expectEqual(array_list.items[2..], buf);
+        const buf: []const u8 = array_list.items;
+        const actual, const actual_buf = try decode(u32, buf);
+        try testing.expectEqualDeep(153, actual);
+        try testing.expectEqual(array_list.items[2..], actual_buf);
         array_list.clearAndFree();
     }
 
