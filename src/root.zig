@@ -199,7 +199,7 @@ pub fn encodedLen(comptime T: type, x: T) usize {
         },
         else => @compileError("expected T to have integer type"),
     };
-    if (x == 0) return 1;
+    if (@abs(x) <= 1) return 1;
     const bits = sign_bits + math.log2_int_ceil(Unsigned(T), @abs(x));
     return math.divCeil(usize, bits, 7) catch {
         unreachable;
@@ -208,6 +208,7 @@ pub fn encodedLen(comptime T: type, x: T) usize {
 
 test encodedLen {
     try testing.expectEqual(1, encodedLen(u32, 0));
+    try testing.expectEqual(1, encodedLen(u32, 1));
     try testing.expectEqual(2, encodedLen(u32, 256));
     try testing.expectEqual(2, encodedLen(u32, 153));
     try testing.expectEqual(1, encodedLen(u32, 128));
@@ -317,9 +318,7 @@ test "fuzz decode inverse encode u64" {
     try std.testing.fuzz(@as(u1, 0), struct {
         fn f(_: u1, input: []const u8) anyerror!void {
             const expected = std.hash.Murmur2_64.hash(input);
-            const buf: []const u8 = allocEncode(u64, testing.allocator, expected) catch {
-                return;
-            };
+            const buf: []const u8 = try allocEncode(u64, testing.allocator, expected);
             defer testing.allocator.free(buf);
             try testing.expectEqual(expected, decodeUnchecked(u64, buf).@"0");
         }
@@ -330,11 +329,20 @@ test "fuzz decode inverse encode i32" {
     try std.testing.fuzz(@as(u1, 0), struct {
         fn f(_: u1, input: []const u8) anyerror!void {
             const expected: i32 = @bitCast(std.hash.Murmur2_32.hash(input));
-            const buf: []const u8 = allocEncode(i32, testing.allocator, expected) catch {
-                return;
-            };
+            const buf: []const u8 = try allocEncode(i32, testing.allocator, expected);
             defer testing.allocator.free(buf);
             try testing.expectEqual(expected, decodeUnchecked(i32, buf).@"0");
+        }
+    }.f, .{});
+}
+
+test "fuzz allocEncode len equals encodedLen" {
+    try std.testing.fuzz(@as(u1, 0), struct {
+        fn f(_: u1, input: []const u8) anyerror!void {
+            const x: u64 = std.hash.Wyhash.hash(0, input);
+            const buf: []const u8 = try allocEncode(u64, testing.allocator, x);
+            defer testing.allocator.free(buf);
+            try testing.expectEqual(buf.len, encodedLen(u64, x));
         }
     }.f, .{});
 }
